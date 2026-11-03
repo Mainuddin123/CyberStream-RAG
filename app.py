@@ -8,7 +8,7 @@ from src.rag import (
     detect_prompt_injection,
     extract_product_target,
 )
-
+from src.cloud_setup import initialize_cloud_knowledge_base
 
 # --------------------------------------------------
 # Page configuration
@@ -21,7 +21,18 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+# --------------------------------------------------
+# Cloud knowledge-base initialization
+# --------------------------------------------------
 
+try:
+    knowledge_base_status = initialize_cloud_knowledge_base()
+
+except Exception as error:
+    st.error(
+        f"Knowledge-base initialization failed: {error}"
+    )
+    st.stop()
 
 # --------------------------------------------------
 # Professional dark theme + rainbow gradient
