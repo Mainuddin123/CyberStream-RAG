@@ -9,6 +9,8 @@ from src.rag import (
     extract_product_target,
 )
 from src.cloud_setup import initialize_cloud_knowledge_base
+from src.catalog_analytics import get_catalog_analytics
+
 
 # --------------------------------------------------
 # Page configuration
@@ -21,18 +23,18 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
 # --------------------------------------------------
 # Cloud knowledge-base initialization
 # --------------------------------------------------
 
 try:
     knowledge_base_status = initialize_cloud_knowledge_base()
-
 except Exception as error:
-    st.error(
-        f"Knowledge-base initialization failed: {error}"
-    )
+    st.error(f"Knowledge-base initialization failed: {error}")
     st.stop()
+
 
 # --------------------------------------------------
 # Professional dark theme + rainbow gradient
@@ -756,6 +758,56 @@ else:
         """,
         unsafe_allow_html=True,
     )
+
+
+# --------------------------------------------------
+# Catalog-wide vulnerability analytics
+# --------------------------------------------------
+
+st.markdown(
+    '<div class="section-title">📊 CISA catalog analytics</div>',
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Catalog-wide analysis of all records stored in SQLite. "
+    "Categories are estimated using keyword rules, not official CISA classifications."
+)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_catalog_analytics_cached():
+    return get_catalog_analytics()
+
+try:
+    with st.spinner("Analyzing the indexed CISA catalog..."):
+        analytics = load_catalog_analytics_cached()
+
+    total_records = analytics["total_records"]
+    classified_records = analytics["classified_records"]
+    categories = analytics["categories"]
+
+    analytics_metrics = st.columns(2)
+    analytics_metrics[0].metric("Catalog records analyzed", f"{total_records:,}")
+    analytics_metrics[1].metric("Records with a classification", f"{classified_records:,}")
+
+    if not categories.empty:
+        chart_data = categories.set_index("Vulnerability Type")["Record Count"]
+        st.bar_chart(chart_data)
+        st.dataframe(
+            categories,
+            use_container_width=True,
+        )
+    else:
+        st.info("No catalog records are available for classification.")
+
+    st.caption(analytics["classification_method"])
+    st.caption(
+        "A CVE may match more than one category, so category counts and percentages "
+        "are not mutually exclusive and may add up to more than 100%. "
+        "Unclassified records are grouped under Other / Unclassified."
+    )
+
+except Exception as analytics_error:
+    st.warning(f"Catalog analytics are temporarily unavailable: {analytics_error}")
 
 
 # --------------------------------------------------

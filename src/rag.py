@@ -7,7 +7,13 @@ from dotenv import load_dotenv
 from google import genai
 from langsmith import traceable
 
-from src.search import search_threats
+import chromadb
+
+from src.search import (
+    search_threats,
+    CHROMA_DIR,
+    COLLECTION_NAME,
+)
 from src.answer_evaluator import evaluate_answer, save_result
 
 
@@ -93,68 +99,82 @@ def detect_prompt_injection(question):
 
 
 # --------------------------------------------------
-# 3. Product-target extraction
+# 3. Multiple product-target extraction
 # --------------------------------------------------
 
 PRODUCT_INTENT_PATTERNS = [
-    r"\b(?:affect|affecting|impact|targeting|target)\s+(.+?)[?.!]*$",
-    r"\b(?:vulnerabilities|security issues|cves?)\s+(?:in|for)\s+(.+?)[?.!]*$",
-    r"\b(?:security flaws|weaknesses)\s+(?:in|for)\s+(.+?)[?.!]*$",
+    # Example: Which vulnerabilities affect Microsoft Windows and Adobe?
+    r"\b(?:affect|affecting|impact|impacting|targeting|target)\s+(.+?)(?=[?.!]|$)",
+    # Example: vulnerabilities in Microsoft Windows and Adobe
+    r"\b(?:vulnerabilities|security issues|cves?)\s+(?:in|for)\s+(.+?)(?=[?.!]|$)",
+    r"\b(?:security flaws|weaknesses)\s+(?:in|for)\s+(.+?)(?=[?.!]|$)",
+    # Example: List CVEs for Microsoft Windows
+    r"\b(?:list|show|find)\s+cves?\s+(?:for|in)\s+(.+?)(?=[?.!]|$)",
 ]
 
 GENERIC_PRODUCT_WORDS = {
-    "product",
-    "products",
-    "software",
-    "application",
-    "applications",
-    "system",
-    "systems",
-    "technology",
-    "technologies",
+    "product", "products", "software", "application", "applications",
+    "system", "systems", "technology", "technologies",
 }
 
 
-def extract_product_target(question):
-    """
-    Extract an explicitly mentioned product or vendor
-    from a product-specific vulnerability question.
-
-    Broad questions return None and are not restricted.
-    """
+def extract_product_targets(question):
+    """Extract one or more explicit product/vendor targets from a question."""
 
     if not isinstance(question, str):
-        return None
+        return []
 
     for pattern in PRODUCT_INTENT_PATTERNS:
-
-        match = re.search(
-            pattern,
-            question,
-            re.IGNORECASE
-        )
-
+        match = re.search(pattern, question, re.IGNORECASE)
         if not match:
             continue
 
-        target = match.group(1).strip()
+        target_text = match.group(1).strip()
+        normalized_target_text = normalize_text(target_text)
 
-        # Remove common trailing generic words.
-        words = target.split()
+        # A catalog/source name is not a product target.
+        broad_source_phrases = {
+            "cisa catalog",
+            "the cisa catalog",
+            "known exploited vulnerabilities catalog",
+            "the known exploited vulnerabilities catalog",
+            "cisa known exploited vulnerabilities catalog",
+            "the cisa known exploited vulnerabilities catalog",
+            "kev catalog",
+            "the kev catalog",
+        }
+        if normalized_target_text in broad_source_phrases:
+            return []
 
-        while (
-            words
-            and words[-1].strip(".,!?").lower()
-            in GENERIC_PRODUCT_WORDS
-        ):
-            words.pop()
+        parts = re.split(r"\s+(?:and|or)\s+|[,;]", target_text, flags=re.IGNORECASE)
+        targets = []
 
-        target = " ".join(words).strip(" .,!?:;")
+        for part in parts:
+            words = part.strip(" .,!?:;").split()
 
-        if target:
-            return target
+            while words and words[0].lower() in {"the", "both"}:
+                words.pop(0)
 
-    return None
+            while words and words[-1].strip(".,!?").lower() in GENERIC_PRODUCT_WORDS:
+                words.pop()
+
+            target = " ".join(words).strip(" .,!?:;")
+            if target and normalize_text(target) not in {
+                normalize_text(existing) for existing in targets
+            }:
+                targets.append(target)
+
+        if targets:
+            return targets
+
+    return []
+
+
+def extract_product_target(question):
+    """Backward-compatible helper returning the first extracted target."""
+
+    targets = extract_product_targets(question)
+    return targets[0] if targets else None
 
 
 # --------------------------------------------------
@@ -162,9 +182,7 @@ def extract_product_target(question):
 # --------------------------------------------------
 
 def normalize_text(value):
-    """
-    Normalize text for consistent product comparison.
-    """
+    """Normalize text for consistent product comparison."""
 
     return re.sub(
         r"[^a-z0-9]+",
@@ -174,43 +192,76 @@ def normalize_text(value):
 
 
 def filter_relevant_evidence(question, evidence):
-    """
-    Filter evidence using the explicitly requested
-    product or vendor name.
+    """Keep records matching at least one explicitly requested target."""
 
-    If the question is broad, preserve all evidence.
+    targets = extract_product_targets(question)
 
-    If a product target is identified, only retain
-    records whose metadata contains that target.
-
-    Returns:
-        filtered_evidence, target
-    """
-
-    target = extract_product_target(question)
-
-    # Do not restrict broad cybersecurity questions.
-    if not target:
+    # Broad questions should not be restricted to a product.
+    if not targets:
         return evidence, None
 
-    normalized_target = normalize_text(target)
-
+    normalized_targets = [normalize_text(target) for target in targets]
     relevant_evidence = []
 
     for item in evidence:
+        record_text = normalize_text(" ".join([
+            str(item.get("vendor", "")),
+            str(item.get("product", "")),
+            str(item.get("name", "")),
+        ]))
 
-        record_text = normalize_text(
-            " ".join([
-                str(item.get("vendor", "")),
-                str(item.get("product", "")),
-                str(item.get("name", "")),
-            ])
-        )
-
-        if normalized_target in record_text:
+        if any(target and target in record_text for target in normalized_targets):
             relevant_evidence.append(item)
 
-    return relevant_evidence, target
+    return relevant_evidence, ", ".join(targets)
+
+
+# --------------------------------------------------
+# 4A. Exact CVE lookup
+# --------------------------------------------------
+
+def extract_cve_ids(question):
+    """Return unique CVE identifiers explicitly present in the question."""
+
+    found = re.findall(r"\bCVE-\d{4}-\d{4,}\b", question, re.IGNORECASE)
+    return list(dict.fromkeys(cve.upper() for cve in found))
+
+
+def retrieve_exact_cve_evidence(cve_ids):
+    """Look up exact CVE IDs directly in ChromaDB, not by similarity search."""
+
+    if not cve_ids:
+        return []
+
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    collection = client.get_collection(name=COLLECTION_NAME)
+    result = collection.get(
+        ids=cve_ids,
+        include=["metadatas", "documents"],
+    )
+
+    evidence = []
+    metadatas = result.get("metadatas") or []
+    documents = result.get("documents") or []
+    ids = result.get("ids") or []
+
+    for index, cve_id in enumerate(ids):
+        metadata = metadatas[index] or {}
+        evidence.append({
+            "cve_id": metadata.get("cve_id", cve_id),
+            "name": metadata.get("name", "Unknown vulnerability"),
+            "vendor": metadata.get("vendor", "Unknown vendor"),
+            "product": metadata.get("product", "Unknown product"),
+            "date_added": metadata.get("date_added", ""),
+            "details": documents[index] if index < len(documents) else "",
+            "rrf_score": None,
+            "rerank_score": None,
+            "distance": None,
+        })
+
+    # Preserve the order of CVE IDs in the user's question.
+    evidence_by_id = {item["cve_id"].upper(): item for item in evidence}
+    return [evidence_by_id[cve] for cve in cve_ids if cve in evidence_by_id]
 
 
 # --------------------------------------------------
@@ -503,31 +554,48 @@ def generate_answer(question):
         )
 
     # STEP 3: Retrieve evidence
+    # Exact CVE questions use direct ID lookup. Other questions use hybrid search.
 
-    evidence = retrieve_evidence(
-        question,
-        top_k=TOP_K
-    )
+    requested_cves = extract_cve_ids(question)
 
-    if not evidence:
+    if requested_cves:
+        evidence = retrieve_exact_cve_evidence(requested_cves)
 
-        return (
-            "No matching evidence was found in the indexed "
-            "CISA threat catalog. Try another query or "
-            "check whether the catalog has been indexed."
-        ), []
+        if not evidence:
+            requested_list = ", ".join(requested_cves)
+            return (
+                f"No matching evidence was found for {requested_list} "
+                "in the indexed CISA threat catalog. No unrelated records "
+                "are displayed for an exact CVE lookup."
+            ), []
+
+    else:
+        evidence = retrieve_evidence(
+            question,
+            top_k=TOP_K
+        )
+
+        if not evidence:
+            return (
+                "No matching evidence was found in the indexed "
+                "CISA threat catalog. Try another query or "
+                "check whether the catalog has been indexed."
+            ), []
 
     # STEP 4: Evidence relevance validation
 
-    relevant_evidence, target = filter_relevant_evidence(
-        question,
-        evidence
-    )
+    if requested_cves:
+        relevant_evidence, target = evidence, None
+    else:
+        relevant_evidence, target = filter_relevant_evidence(
+            question,
+            evidence
+        )
 
     if target:
 
         print(
-            f"\nRequested product/vendor: {target}"
+            f"\nRequested product/vendor target(s): {target}"
         )
 
         print(
