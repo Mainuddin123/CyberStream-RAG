@@ -1,0 +1,23 @@
+.venv/
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pycharm/
+.vscode/
+
+data/*
+!data/evaluation_questions.json
+
+*.db
+*.sqlite
+*.sqlite3
+
+.pytest_cache/
+.streamlit/secrets.toml
+
+# Local backup files
+app_backup.py

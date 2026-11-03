@@ -1,0 +1,24 @@
+
+# Streamlit application
+streamlit
+python-dotenv
+
+# Data collection
+requests
+
+# Kafka streaming
+kafka-python
+
+# Vector database and embeddings
+chromadb
+sentence-transformers
+
+# Hybrid retrieval and reranking
+rank-bm25
+flashrank
+
+# LLM integration
+google-genai
+
+# Observability and tracing
+langsmith

@@ -1,0 +1,28 @@
+[
+  {
+    "question": "Which vulnerabilities affect Microsoft SharePoint?",
+    "relevant_cve_ids": [
+      "CVE-2025-49704",
+      "CVE-2025-49706",
+      "CVE-2024-38094"
+    ]
+  },
+  {
+    "question": "Which vulnerabilities affect Ivanti Connect Secure?",
+    "relevant_cve_ids": [
+      "CVE-2023-46805",
+      "CVE-2024-21887",
+      "CVE-2019-11539"
+    ]
+  },
+  {
+    "question": "Which vulnerabilities affect Adobe products?",
+    "relevant_cve_ids": [
+      "CVE-2013-3346",
+      "CVE-2016-0984",
+      "CVE-2014-0496",
+      "CVE-2017-11292",
+      "CVE-2010-0188"
+    ]
+  }
+]
